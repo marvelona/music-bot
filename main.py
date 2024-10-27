@@ -5,8 +5,7 @@ from telegram.ext import Application, CommandHandler, CallbackContext, CallbackQ
 import tempfile
 
 # Telegram bot token from environment variable
-TELEGRAM_BOT_TOKEN = '7064086507:AAFYD6ujyjknKvEy7xbnAIcZiUNfIojtgvo'
-
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 # Function to fetch song details from the Spotify Music Downloader API
 def get_spotify_song(song_name):
     query = song_name.replace(' ', '+')
