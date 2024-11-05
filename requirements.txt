@@ -1,2 +1,3 @@
-python-telegram-bot==20.3
-requests
+python-telegram-bot==20.3  # Latest stable version; check version compatibility with your code
+requests  # For handling HTTP requests
+python-dotenv  # For loading environment variables
