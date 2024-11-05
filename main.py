@@ -2,99 +2,173 @@ import os
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackContext, CallbackQueryHandler
+from dotenv import load_dotenv
+load_dotenv()
 import tempfile
+import time
 
-# Telegram bot token from environment variable
+# Telegram bot token and allowed group ID from environment variable
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-# Function to fetch song details from the Spotify Music Downloader API
+ALLOWED_CHAT_ID = int(os.getenv('ALLOWED_CHAT_ID', '-1002363559013'))
+
+# Retry settings
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds
+
+# Function to fetch song details from the Spotify API with retry mechanism
 def get_spotify_song(song_name):
     query = song_name.replace(' ', '+')
     api_url = f"https://spotifyapi.nepdevsnepcoder.workers.dev/?songname={query}"
-    
-    try:
-        response = requests.get(api_url)
-        if response.status_code == 200:
-            data = response.json()
-            if data:
-                return data  # Return all results
-            else:
-                return None
-        else:
-            return None
-    except Exception as e:
-        print(f"Error fetching song details: {e}")
-        return None
+    retries = 0
 
-# Command handler for the /song command
+    while retries < MAX_RETRIES:
+        try:
+            response = requests.get(api_url)
+            if response.status_code == 200:
+                data = response.json()
+                return data if data else None
+            else:
+                retries += 1
+                time.sleep(RETRY_DELAY)
+        except Exception as e:
+            print(f"Error fetching song details: {e}")
+            retries += 1
+            time.sleep(RETRY_DELAY)
+
+    return None
+
+# Command handler for /song command with loading message and retry mechanism
 async def song_command(update: Update, context: CallbackContext) -> None:
+    if update.effective_chat.id != ALLOWED_CHAT_ID:
+        await update.message.reply_text("This bot is restricted to a specific group.")
+        return
+
     if context.args:
         query = ' '.join(context.args)
-        song_data = get_spotify_song(query)
-        
-        if song_data:
-            top_results = song_data[:3]
-            reply_text = "*🎶 Top Results:*\n\n"
-            keyboard = []
+        loading_message = await update.message.reply_text("🔍 Searching for song, please wait...")
 
-            # Create inline buttons for each song download link
-            for idx, song in enumerate(top_results, start=1):
-                button = InlineKeyboardButton(
-                    f"🔊 {song['song_name']} by {song['artist_name']}", 
-                    callback_data=f"download_{idx-1}"
-                )
-                keyboard.append([button])
-            
+        song_data = get_spotify_song(query)
+
+        if song_data:
+            song = song_data[0]
+            song_name = song['song_name']
+            artist_name = song['artist_name']
+
+            # Inline buttons for download, cancel, and search more results
+            keyboard = [
+                [InlineKeyboardButton("⬇️ Download", callback_data="download_0")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
+                [InlineKeyboardButton("🔄 Search more results", callback_data="search_more")]
+            ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(reply_text, parse_mode='Markdown', reply_markup=reply_markup)
-            context.user_data['song_data'] = top_results
+
+            await update.message.reply_text(
+                f"🎶 Found: *{song_name}* by *{artist_name}*\nClick below to download.",
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+            context.user_data['song_data'] = song_data
         else:
             await update.message.reply_text("❌ No results found for your query.")
-    else:
-        await update.message.reply_text("🛑 Please provide a song name to search for, e.g., /song Believer")
-
-# Function to handle downloading the song
-async def download_song(update: Update, context: CallbackContext, index: int) -> None:
-    if 'song_data' in context.user_data:
-        song_data = context.user_data['song_data'][index]
-        download_link = song_data['download_link']
-        song_name = song_data['song_name']
         
-        # Download the song using the download link
-        try:
-            response = requests.get(download_link, stream=True, timeout=10)  # Added a timeout
-            if response.status_code == 200:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
-                    temp_file.write(response.content)
-                    temp_file_path = temp_file.name
-                
-                # Send the downloaded song to the group
-                await update.callback_query.message.reply_audio(audio=open(temp_file_path, 'rb'), title=song_name)
-                
-                # Clean up the temporary file
-                os.remove(temp_file_path)
+        await context.bot.delete_message(chat_id=loading_message.chat_id, message_id=loading_message.message_id)
+    else:
+        await update.message.reply_text("🛑 Please provide a song name to search, e.g., /song Believer")
 
-                # Delete previous messages related to the song command
-                await context.bot.delete_message(chat_id=update.callback_query.message.chat_id, message_id=update.callback_query.message.message_id)
-                await update.callback_query.answer()  # Acknowledge the button press
-            else:
-                await update.callback_query.message.reply_text("❌ Failed to download the song. Please try again.")
-        except Exception as e:
-            print(f"Error downloading the song: {e}")
-            await update.callback_query.message.reply_text("❌ An error occurred while downloading the song.")
+# Handler for song download with improved file management
+async def download_song(update: Update, context: CallbackContext, index: int) -> None:
+    song_data = context.user_data.get('song_data')
+    if not song_data:
+        await update.callback_query.message.reply_text("❌ No song data found.")
+        return
 
-# Callback handler for button presses
+    song = song_data[index]
+    download_link = song['download_link']
+    song_name = song['song_name']
+
+    try:
+        response = requests.get(download_link, stream=True, timeout=10)
+        if response.status_code == 200:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
+                temp_file.write(response.content)
+                temp_file_path = temp_file.name
+
+            await update.callback_query.message.reply_audio(
+                audio=open(temp_file_path, 'rb'),
+                title=song_name
+            )
+
+            # Clean up the temporary file after sending
+            os.remove(temp_file_path)
+            await update.callback_query.answer("Song downloaded successfully.")
+        else:
+            await update.callback_query.message.reply_text("❌ Failed to download the song.")
+    except Exception as e:
+        print(f"Error downloading the song: {e}")
+        await update.callback_query.message.reply_text("❌ An error occurred while downloading the song.")
+    finally:
+        # Ensure file is removed even if error occurs
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+# Callback handler to handle inline button presses
 async def button_handler(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
-    if query:  # Check if query is not None
-        await query.answer()  # Acknowledge the callback query
-        index = int(query.data.split('_')[1])  # Extract the song index
+    await query.answer()
+
+    if query.data == "cancel":
+        await query.message.edit_text("✅ Request canceled.")
+    elif query.data == "search_more":
+        await query.message.reply_text("Please use /search to find more results.")
+    elif query.data.startswith("download_"):
+        index = int(query.data.split('_')[1])
         await download_song(update, context, index)
 
+# Command handler for /search command to get more results
+async def search_command(update: Update, context: CallbackContext) -> None:
+    query = ' '.join(context.args)
+    if not query:
+        await update.message.reply_text("🛑 Please provide a song name to search, e.g., /search Believer")
+        return
+
+    loading_message = await update.message.reply_text("🔍 Searching for more songs...")
+    song_data = get_spotify_song(query)
+
+    if song_data:
+        reply_text = "*🎶 Additional Results:*\n\n"
+        keyboard = []
+        for idx, song in enumerate(song_data[:3], start=1):
+            button = InlineKeyboardButton(
+                f"🔊 {song['song_name']} by {song['artist_name']}",
+                callback_data=f"download_{idx-1}"
+            )
+            keyboard.append([button])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(reply_text, parse_mode='Markdown', reply_markup=reply_markup)
+        context.user_data['song_data'] = song_data
+    else:
+        await update.message.reply_text("❌ No additional results found.")
+    
+    await context.bot.delete_message(chat_id=loading_message.chat_id, message_id=loading_message.message_id)
+
+# Command handler for welcome message and help information
+async def start(update: Update, context: CallbackContext) -> None:
+    welcome_message = (
+        "👋 Welcome to the group! This bot can search and download songs. "
+        "Use /song <song name> to find a song or /search for more options.\n"
+        "For assistance, contact @marvelona2."
+    )
+    await update.message.reply_text(welcome_message)
+
+# Main function to run the bot
 def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
+    application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('song', song_command))
-    application.add_handler(CallbackQueryHandler(button_handler))  # Use CallbackQueryHandler for button presses
+    application.add_handler(CommandHandler('search', search_command))
+    application.add_handler(CallbackQueryHandler(button_handler))
 
     application.run_polling()
 
