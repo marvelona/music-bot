@@ -124,33 +124,51 @@ async def button_handler(update: Update, context: CallbackContext) -> None:
         index = int(query.data.split('_')[1])
         await download_song(update, context, index)
 
-# Command handler for /search command to get more results
+# Enhanced /search Command
 async def search_command(update: Update, context: CallbackContext) -> None:
+    # Check if a query is provided
     query = ' '.join(context.args)
     if not query:
         await update.message.reply_text("🛑 Please provide a song name to search, e.g., /search Believer")
         return
 
-    loading_message = await update.message.reply_text("🔍 Searching for more songs...")
-    song_data = get_spotify_song(query)
+    # Inform user that the bot is searching
+    loading_message = await update.message.reply_text("🔍 Searching for more songs, please wait...")
 
-    if song_data:
+    # Fetch song data using the Spotify API
+    try:
+        song_data = get_spotify_song(query)  # Reusing the `get_spotify_song` function
+        if not song_data:
+            raise ValueError("No results found.")
+
+        # Prepare response
         reply_text = "*🎶 Additional Results:*\n\n"
         keyboard = []
-        for idx, song in enumerate(song_data[:3], start=1):
+
+        for idx, song in enumerate(song_data[:5]):  # Show up to 5 results
+            song_name = song['song_name']
+            artist_name = song['artist_name']
             button = InlineKeyboardButton(
-                f"🔊 {song['song_name']} by {song['artist_name']}",
-                callback_data=f"download_{idx-1}"
+                f"🔊 {song_name} by {artist_name}",
+                callback_data=f"download_{idx}"
             )
             keyboard.append([button])
+            reply_text += f"{idx + 1}. *{song_name}* by *{artist_name}*\n"
 
+        # Send results with inline buttons
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(reply_text, parse_mode='Markdown', reply_markup=reply_markup)
-        context.user_data['song_data'] = song_data
-    else:
-        await update.message.reply_text("❌ No additional results found.")
-    
-    await context.bot.delete_message(chat_id=loading_message.chat_id, message_id=loading_message.message_id)
+        await update.message.reply_text(
+            reply_text,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+        context.user_data['song_data'] = song_data  # Cache results in user context
+    except Exception as e:
+        print(f"Error in /search: {e}")
+        await update.message.reply_text("❌ An error occurred while searching. Please try again later.")
+    finally:
+        # Delete loading message
+        await context.bot.delete_message(chat_id=loading_message.chat_id, message_id=loading_message.message_id)
 
 # Command handler for welcome message and help information
 async def start(update: Update, context: CallbackContext) -> None:
