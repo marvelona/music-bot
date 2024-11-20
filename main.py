@@ -42,46 +42,6 @@ def get_spotify_song(song_name):
 
     return None
 
-# Command handler for /song command with loading message and retry mechanism
-async def song_command(update: Update, context: CallbackContext) -> None:
-    if update.effective_chat.id != ALLOWED_CHAT_ID:
-        await update.message.reply_text("This bot is restricted to a specific group.")
-        return
-
-    if context.args:
-        query = ' '.join(context.args)
-        loading_message = await update.message.reply_text("🔍 Searching for song, please wait...")
-
-        song_data = get_spotify_song(query)
-
-        if song_data:
-            song = song_data[0]
-            song_name = song['song_name']
-            artist_name = song['artist_name']
-
-            # Inline buttons for download, cancel, and search more results
-            keyboard = [
-                [InlineKeyboardButton("⬇️ Download", callback_data="download_0")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
-                [InlineKeyboardButton("🔄 Search more results", callback_data="search_more")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            await update.message.reply_text(
-                f"🎶 Found: *{song_name}* by *{artist_name}*\nClick below to download.",
-                parse_mode="Markdown",
-                reply_markup=reply_markup
-            )
-
-            # Cache song data globally for the user
-            user_song_data[update.effective_user.id] = song_data
-        else:
-            await update.message.reply_text("❌ No results found for your query.")
-        
-        await context.bot.delete_message(chat_id=loading_message.chat_id, message_id=loading_message.message_id)
-    else:
-        await update.message.reply_text("🛑 Please provide a song name to search, e.g., /song Believer")
-
 # Handler for song download with improved file management
 async def download_song(update: Update, context: CallbackContext, index: int) -> None:
     user_id = update.effective_user.id
@@ -113,7 +73,7 @@ async def download_song(update: Update, context: CallbackContext, index: int) ->
 
             # Clean up the temporary file after sending
             os.remove(temp_file_path)
-            await update.callback_query.answer("Song downloaded successfully.")
+            await update.callback_query.answer("🎵 Song downloaded successfully.")
         else:
             await update.callback_query.message.reply_text("❌ Failed to download the song.")
     except Exception as e:
@@ -148,17 +108,26 @@ async def search_command(update: Update, context: CallbackContext) -> None:
     song_data = get_spotify_song(query)
 
     if song_data:
-        reply_text = "*🎶 Additional Results:*\n\n"
         keyboard = []
-        for idx, song in enumerate(song_data[:3], start=1):
+        for idx, song in enumerate(song_data[:3]):
             button = InlineKeyboardButton(
-                f"🔊 {song['song_name']} by {song['artist_name']}",
-                callback_data=f"download_{idx-1}"
+                f"🎵 {song['song_name']} by {song['artist_name']}",
+                callback_data=f"download_{idx}"
             )
             keyboard.append([button])
 
+            metadata = (
+                f"❖ *Song Name:* ➥ {song['song_name']}\n"
+                f"● *Album:* ➥ {song['album_name']}\n"
+                f"● *Release Date:* ➥ {song['release_date']}\n"
+                f"● *Requested By:* ➥ {update.effective_user.first_name}\n"
+                f"❖ *Powered By:* ➥ ASI Music"
+            )
+
+            await update.message.reply_text(metadata, parse_mode="Markdown")
+
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(reply_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await update.message.reply_text("Select a song to download:", reply_markup=reply_markup)
 
         # Cache song data globally for the user
         user_song_data[update.effective_user.id] = song_data
@@ -171,7 +140,7 @@ async def search_command(update: Update, context: CallbackContext) -> None:
 async def start(update: Update, context: CallbackContext) -> None:
     welcome_message = (
         "👋 Welcome to the group! This bot can search and download songs. "
-        "Use /song <song name> to find a song or /search for more options.\n"
+        "Use /search <song name> to find a song.\n"
         "For assistance, contact @marvelona2."
     )
     await update.message.reply_text(welcome_message)
@@ -181,7 +150,6 @@ def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('song', song_command))
     application.add_handler(CommandHandler('search', search_command))
     application.add_handler(CallbackQueryHandler(button_handler))
 
