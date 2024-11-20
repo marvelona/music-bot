@@ -42,6 +42,37 @@ def get_spotify_song(song_name):
 
     return None
 
+# Function to fetch song details from the Jio Saavn API with retry mechanism
+def get_jio_saavn_song(song_name):
+    query = song_name.replace(' ', '+')
+    api_url = f"https://jiosaavn-api-codyandersan.vercel.app/search/all?query={query}&page=1&limit=6"
+    retries = 0
+
+    while retries < MAX_RETRIES:
+        try:
+            response = requests.get(api_url)
+            if response.status_code == 200:
+                data = response.json().get("results", [])
+                return data if data else None
+            else:
+                retries += 1
+                time.sleep(RETRY_DELAY)
+        except Exception as e:
+            print(f"Error fetching song details: {e}")
+            retries += 1
+            time.sleep(RETRY_DELAY)
+
+    return None
+
+# Unified function to get song details from both APIs
+def get_song_details(song_name):
+    # Try Spotify API first
+    song_data = get_spotify_song(song_name)
+    if not song_data:
+        # Fallback to Jio Saavn API
+        song_data = get_jio_saavn_song(song_name)
+    return song_data
+
 # Handler for song download with improved file management
 async def download_song(update: Update, context: CallbackContext, index: int) -> None:
     user_id = update.effective_user.id
@@ -56,7 +87,7 @@ async def download_song(update: Update, context: CallbackContext, index: int) ->
         return
 
     song = song_data[index]
-    download_link = song['download_link']
+    download_link = song.get('download_link') or song.get('media_url')
     song_name = song['song_name']
 
     try:
@@ -104,8 +135,8 @@ async def search_command(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text("🛑 Please provide a song name to search, e.g., /search Believer")
         return
 
-    loading_message = await update.message.reply_text("🔍 Searching for more songs...")
-    song_data = get_spotify_song(query)
+    loading_message = await update.message.reply_text("🔍 Searching for songs...")
+    song_data = get_song_details(query)
 
     if song_data:
         keyboard = []
@@ -118,10 +149,10 @@ async def search_command(update: Update, context: CallbackContext) -> None:
 
             metadata = (
                 f"❖ *Song Name:* ➥ {song['song_name']}\n"
-                f"● *Album:* ➥ {song['album_name']}\n"
-                f"● *Release Date:* ➥ {song['release_date']}\n"
+                f"● *Album:* ➥ {song.get('album_name', 'Unknown')}\n"
+                f"● *Release Date:* ➥ {song.get('release_date', 'Unknown')}\n"
                 f"● *Requested By:* ➥ {update.effective_user.first_name}\n"
-                f"❖ *Powered By:* ➥ ASI Music"
+                f"❖ *Powered By:* ➥ Multi-API Music"
             )
 
             await update.message.reply_text(metadata, parse_mode="Markdown")
@@ -132,14 +163,14 @@ async def search_command(update: Update, context: CallbackContext) -> None:
         # Cache song data globally for the user
         user_song_data[update.effective_user.id] = song_data
     else:
-        await update.message.reply_text("❌ No additional results found.")
+        await update.message.reply_text("❌ No results found.")
     
     await context.bot.delete_message(chat_id=loading_message.chat_id, message_id=loading_message.message_id)
 
 # Command handler for welcome message and help information
 async def start(update: Update, context: CallbackContext) -> None:
     welcome_message = (
-        "👋 Welcome to the group! This bot can search and download songs. "
+        "👋 Welcome! This bot can search and download songs using multiple APIs. "
         "Use /search <song name> to find a song.\n"
         "For assistance, contact @marvelona2."
     )
