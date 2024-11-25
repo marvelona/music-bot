@@ -4,6 +4,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackContext, CallbackQueryHandler
 from dotenv import load_dotenv
 import tempfile
+import logging
 
 # Load environment variables
 load_dotenv()
@@ -22,6 +23,10 @@ LAST_FM_API = "http://ws.audioscrobbler.com/2.0/"
 
 # Dictionary to cache user-specific data
 user_song_data = {}
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Fetch song details from APIs
 def fetch_song(query):
@@ -48,7 +53,7 @@ def fetch_song(query):
                     for result in data['results'] if result.get('perma_url')
                 ]
     except Exception as e:
-        print(f"Error fetching song data: {e}")
+        logger.error(f"Error fetching song data: {e}")
     return None
 
 # Call Last.fm API
@@ -63,7 +68,7 @@ def call_lastfm_api(method, params):
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        print(f"Last.fm API error: {e}")
+        logger.error(f"Last.fm API error: {e}")
         return {}
 
 async def search_command(update: Update, context: CallbackContext) -> None:
@@ -103,10 +108,10 @@ async def button_handler(update: Update, context: CallbackContext) -> None:
         try:
             with requests.get(download_link, stream=True) as response:
                 if response.status_code == 200:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
+                    temp_file_path = os.path.join(tempfile.gettempdir(), f"{song['song_name']}.mp3")
+                    with open(temp_file_path, 'wb') as temp_file:
                         for chunk in response.iter_content(chunk_size=1024 * 1024):
                             temp_file.write(chunk)
-                        temp_file_path = temp_file.name
 
                     await query.message.reply_audio(
                         audio=open(temp_file_path, 'rb'),
@@ -116,10 +121,89 @@ async def button_handler(update: Update, context: CallbackContext) -> None:
                 else:
                     await query.message.reply_text("❌ Unable to download the song. Please try again later.")
         except Exception as e:
-            print(f"Download error: {e}")
+            logger.error(f"Download error: {e}")
             await query.message.reply_text("❌ Error downloading the song. Please try again later.")
 
-# Add a placeholder for the similar_command
+# Fetch artist info from Last.fm API
+async def artist_command(update: Update, context: CallbackContext) -> None:
+    artist_name = ' '.join(context.args)
+    if not artist_name:
+        await update.message.reply_text("🛑 Provide an artist name, e.g., `/artist Eminem`.")
+        return
+
+    await update.message.reply_text(f"🔍 Searching for artist '{artist_name}'...")
+    try:
+        data = call_lastfm_api('artist.getinfo', {'artist': artist_name})
+        artist = data.get('artist', {})
+
+        if artist:
+            name = artist.get('name', 'Unknown')
+            bio = artist.get('bio', {}).get('summary', 'No biography available.')
+            listeners = artist.get('stats', {}).get('listeners', 'Unknown')
+            playcount = artist.get('stats', {}).get('playcount', 'Unknown')
+            tags = ', '.join(tag['name'] for tag in artist.get('tags', {}).get('tag', []))
+
+            message = (
+                f"🎤 *{name}*\n"
+                f"👥 Listeners: {listeners}\n"
+                f"🎵 Playcount: {playcount}\n"
+                f"🏷 Tags: {tags}\n"
+                f"📖 Biography:\n{bio}"
+            )
+            await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
+        else:
+            await update.message.reply_text(f"❌ No information found for artist '{artist_name}'.")
+    except Exception as e:
+        logger.error(f"Error fetching artist info: {e}")
+        await update.message.reply_text("❌ Error fetching artist information. Please try again later.")
+
+# Fetch top tracks globally or by artist
+async def top_tracks_command(update: Update, context: CallbackContext) -> None:
+    artist_name = ' '.join(context.args)
+    if artist_name:
+        await update.message.reply_text(f"🔍 Searching for top tracks by '{artist_name}'...")
+        try:
+            data = call_lastfm_api('artist.gettoptracks', {'artist': artist_name})
+            top_tracks = data.get('toptracks', {}).get('track', [])[:10]
+
+            if top_tracks:
+                message = f"🎶 *Top tracks by {artist_name}:*\n"
+                for i, track in enumerate(top_tracks, 1):
+                    message += f"{i}. {track['name']} ({track['playcount']} plays)\n"
+                await update.message.reply_text(message, parse_mode="Markdown")
+            else:
+                await update.message.reply_text(f"❌ No top tracks found for artist '{artist_name}'.")
+        except Exception as e:
+            logger.error(f"Error fetching top tracks by artist: {e}")
+            await update.message.reply_text("❌ Error fetching top tracks. Please try again later.")
+    else:
+        await update.message.reply_text("🔍 Fetching top global tracks...")
+        try:
+            data = call_lastfm_api('chart.gettoptracks', {})
+            top_tracks = data.get('tracks', {}).get('track', [])[:10]
+
+            if top_tracks:
+                message = "🌍 *Top global tracks:*\n"
+                for i, track in enumerate(top_tracks, 1):
+                    artist = track['artist']['name']
+                    name = track['name']
+                    listeners = track.get('listeners', 'N/A')
+                    message += f"{i}. {name} by {artist} ({listeners} listeners)\n"
+                await update.message.reply_text(message, parse_mode="Markdown")
+            else:
+                await update.message.reply_text("❌ No global top tracks found.")
+        except Exception as e:
+            logger.error(f"Error fetching global top tracks: {e}")
+            await update.message.reply_text("❌ Error fetching global top tracks. Please try again later.")
+
+async def help_command(update: Update, context: CallbackContext) -> None:
+    help_text = (
+        "🤖 *ASI Music Bot Commands:*\n\n"
+        "🎵 `/search <song>` - Search and download songs.\n"
+        "ℹ️ Contact @marvelona2 for support.\n"
+    )
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
 async def similar_command(update: Update, context: CallbackContext) -> None:
     track_name = ' '.join(context.args)
     if not track_name:
@@ -129,14 +213,17 @@ async def similar_command(update: Update, context: CallbackContext) -> None:
     await update.message.reply_text(f"🔍 Searching for tracks similar to '{track_name}'...")
     try:
         data = call_lastfm_api('track.getsimilar', {'track': track_name})
-        similar_tracks = data['similartracks']['track'][:5]
-        message = f"🎶 *Tracks similar to {track_name}:*\n"
-        for track in similar_tracks:
-            message += f"- {track['name']} by {track['artist']['name']}\n"
-        await update.message.reply_text(message, parse_mode="Markdown")
+        similar_tracks = data.get('similartracks', {}).get('track', [])[:5]
+        if similar_tracks:
+            message = f"🎶 *Tracks similar to {track_name}:*\n"
+            for track in similar_tracks:
+                message += f"- {track['name']} by {track['artist']['name']}\n"
+            await update.message.reply_text(message, parse_mode="Markdown")
+        else:
+            await update.message.reply_text("❌ No similar tracks found.")
     except Exception as e:
-        print(f"Error fetching similar tracks: {e}")
-        await update.message.reply_text("Hi please try the command once more.")
+        logger.error(f"Error fetching similar tracks: {e}")
+        await update.message.reply_text("❌ Error fetching similar tracks. Please try again later.")
 
 # Main function
 def main() -> None:
@@ -149,6 +236,7 @@ def main() -> None:
     application.add_handler(CommandHandler('help', help_command))
     application.add_handler(CallbackQueryHandler(button_handler))
 
+    logger.info("Starting the bot...")
     application.run_polling()
 
 if __name__ == '__main__':
