@@ -16,9 +16,8 @@ ALLOWED_CHAT_ID = int(os.getenv('ALLOWED_CHAT_ID', '-1002363559013'))
 if not TELEGRAM_BOT_TOKEN or not LAST_FM_API_KEY:
     raise EnvironmentError("Environment variables TELEGRAM_BOT_TOKEN and LAST_FM_API_KEY are required.")
 
-# API Endpoints
+# Spotify API
 SPOTIFY_API = "https://spotifyapi.nepdevsnepcoder.workers.dev/?songname={query}"
-JIOSAAVN_API = "https://jiosaavn-api-codyandersan.vercel.app/search/all?query={query}&page=1&limit=6"
 LAST_FM_API = "http://ws.audioscrobbler.com/2.0/"
 
 # Dictionary to cache user-specific data
@@ -28,30 +27,22 @@ user_song_data = {}
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Fetch song details from APIs
+# Fetch song details from Spotify API
 def fetch_song(query):
     query = query.replace(' ', '+')
     try:
-        # Try Spotify API first
         response = requests.get(SPOTIFY_API.format(query=query))
-        if response.status_code == 200:
-            data = response.json()
-            if data:
-                return data
-
-        # Fallback to JioSaavn API
-        response = requests.get(JIOSAAVN_API.format(query=query))
-        if response.status_code == 200:
-            data = response.json()
-            if 'results' in data and isinstance(data['results'], list):
-                return [
-                    {
-                        "song_name": result.get('title', 'Unknown'),
-                        "artist_name": result.get('primary_artists', 'Unknown'),
-                        "download_link": result.get('perma_url', '')
-                    }
-                    for result in data['results'] if result.get('perma_url')
-                ]
+        response.raise_for_status()
+        data = response.json()
+        if data:
+            return [
+                {
+                    "song_name": track['title'],
+                    "artist_name": track['artist'],
+                    "download_link": track['download']
+                }
+                for track in data
+            ]
     except Exception as e:
         logger.error(f"Error fetching song data: {e}")
     return None
@@ -71,10 +62,11 @@ def call_lastfm_api(method, params):
         logger.error(f"Last.fm API error: {e}")
         return {}
 
+# Command handler for /search
 async def search_command(update: Update, context: CallbackContext) -> None:
     query = ' '.join(context.args)
     if not query:
-        await update.message.reply_text("🛑 Please provide a song name, e.g., `/search Believer`.")
+        await update.message.reply_text("🛑 Please provide a song name, e.g., `/search Believer`", parse_mode="Markdown")
         return
 
     await update.message.reply_text("🔍 Searching for songs...")
@@ -87,10 +79,14 @@ async def search_command(update: Update, context: CallbackContext) -> None:
             for i, song in enumerate(song_data[:3])
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("🎶 Select a song to download:", reply_markup=reply_markup)
+        await update.message.reply_text(
+            "🎶 Select a song to download:",
+            reply_markup=reply_markup
+        )
     else:
         await update.message.reply_text("❌ No results found.")
 
+# Callback handler for download
 async def button_handler(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     await query.answer()
@@ -107,19 +103,17 @@ async def button_handler(update: Update, context: CallbackContext) -> None:
 
         try:
             with requests.get(download_link, stream=True) as response:
-                if response.status_code == 200:
-                    temp_file_path = os.path.join(tempfile.gettempdir(), f"{song['song_name']}.mp3")
-                    with open(temp_file_path, 'wb') as temp_file:
-                        for chunk in response.iter_content(chunk_size=1024 * 1024):
-                            temp_file.write(chunk)
+                response.raise_for_status()
+                temp_file_path = os.path.join(tempfile.gettempdir(), f"{song['song_name']}.mp3")
+                with open(temp_file_path, 'wb') as temp_file:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        temp_file.write(chunk)
 
-                    await query.message.reply_audio(
-                        audio=open(temp_file_path, 'rb'),
-                        caption="Powered by ASI Music"
-                    )
-                    os.remove(temp_file_path)
-                else:
-                    await query.message.reply_text("❌ Unable to download the song. Please try again later.")
+                await query.message.reply_audio(
+                    audio=open(temp_file_path, 'rb'),
+                    caption=f"🎵 {song['song_name']} by {song['artist_name']}\nPowered by ASI Music"
+                )
+                os.remove(temp_file_path)
         except Exception as e:
             logger.error(f"Download error: {e}")
             await query.message.reply_text("❌ Error downloading the song. Please try again later.")
