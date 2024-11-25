@@ -10,6 +10,7 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 LAST_FM_API_KEY = os.getenv('LAST_FM_API_KEY')
+ALLOWED_CHAT_ID = int(os.getenv('ALLOWED_CHAT_ID', '-1002363559013'))
 
 if not TELEGRAM_BOT_TOKEN or not LAST_FM_API_KEY:
     raise EnvironmentError("Environment variables TELEGRAM_BOT_TOKEN and LAST_FM_API_KEY are required.")
