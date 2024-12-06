@@ -5,6 +5,7 @@ import asyncio
 import logging
 import functools
 import mimetypes
+import threading
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackContext, CallbackQueryHandler
 from dotenv import load_dotenv
@@ -50,7 +51,6 @@ def retry(max_retries=3, delay=2):
 def fetch_song(query):
     query = query.replace(' ', '+')
 
-    # Try Spotify API first
     for api in [SPOTIFY_API, JIOSAAVN_API]:
         try:
             response = requests.get(api.format(query=query), timeout=(5, 10))
@@ -73,7 +73,6 @@ def fetch_song(query):
 async def search_command(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
 
-    # Check if the command is being issued in the specified group
     if chat_id != int(TARGET_GROUP_CHAT_ID):
         await update.message.reply_text("❌ This bot can only be used in the specific group.")
         return
@@ -112,8 +111,7 @@ async def button_handler(update: Update, context: CallbackContext) -> None:
         await query.message.reply_text("❌ Invalid callback data.")
         return
 
-    chat_id = int(data[0])
-    index = int(data[2])
+    chat_id, index = int(data[0]), int(data[2])
 
     # Check if the callback is from the allowed group
     if chat_id != int(TARGET_GROUP_CHAT_ID):
@@ -128,34 +126,45 @@ async def button_handler(update: Update, context: CallbackContext) -> None:
     song = group_song_data[chat_id][index]
     download_link = song['download_link']
 
-    try:
-        response = requests.get(download_link, stream=True, timeout=(5, 15))
-        response.raise_for_status()
-        
-        file_ext = mimetypes.guess_extension(response.headers.get('content-type', '').split(';')[0]).split('.')[-1] or 'mp3'
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as temp_file:
-            for chunk in response.iter_content(chunk_size=8192): 
-                temp_file.write(chunk)
-            temp_file_path = temp_file.name
+    def download_file(download_link, temp_file_path, result):
+        try:
+            response = requests.get(download_link, stream=True, timeout=(30, 180))  # 3 minutes timeout
+            response.raise_for_status()
+            
+            content_type = response.headers.get('content-type', '').split(';')[0]
+            file_ext = mimetypes.guess_extension(content_type) or '.mp3'
+            
+            with open(temp_file_path, 'wb') as temp_file:
+                for chunk in response.iter_content(chunk_size=8192):
+                    temp_file.write(chunk)
+            result.append(temp_file_path)
+        except requests.RequestException as e:
+            logger.error(f"Download error: {e}")
+            result.append(None)
+    
+    result = []
+    thread = threading.Thread(target=download_file, args=(download_link, f"/tmp/{song['song_name']}.mp3", result))
+    thread.start()
+    thread.join(timeout=180)  # Wait for 3 minutes
 
-        with open(temp_file_path, 'rb') as audio_file:
-            await query.message.reply_audio(
-                audio=audio_file,
-                caption=f"🎶 {song['song_name']} - {song['artist_name']}\nPowered by ASI Music"
-            )
-        os.remove(temp_file_path)
-    except requests.RequestException as e:
-        logger.error(f"Download error: {e}")
+    if result and result[0]:
+        temp_file_path = result[0]
+        if os.path.exists(temp_file_path):
+            with open(temp_file_path, 'rb') as audio_file:
+                await query.message.reply_audio(
+                    audio=audio_file,
+                    caption=f"🎶 {song['song_name']} - {song['artist_name']}\nPowered by ASI Music"
+                )
+            os.remove(temp_file_path)
+        else:
+            await query.message.reply_text("❌ The downloaded file does not exist.")
+    else:
         await query.message.reply_text("❌ Failed to download the song. Please try again later.")
-    except Exception as e:
-        logger.error(f"Unexpected error during download: {e}")
-        await query.message.reply_text("❌ An error occurred while processing your request.")
 
 # Command handler for /help (restricted to specific group)
 async def help_command(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
 
-    # Check if the command is being issued in the specified group
     if chat_id != int(TARGET_GROUP_CHAT_ID):
         await update.message.reply_text("❌ This bot can only be used in the specific group.")
         return
