@@ -1,45 +1,71 @@
 import os
 import requests
+import tempfile
+import asyncio
+import logging
+import functools
+import mimetypes
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackContext, CallbackQueryHandler
 from dotenv import load_dotenv
-import tempfile
 
 # Load environment variables
 load_dotenv()
 
+# Ensure environment variables are set
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-
-# Define the specific group chat ID
-TARGET_GROUP_CHAT_ID = os.getenv('TARGET_GROUP_CHAT_ID')  # Store your group ID here
+TARGET_GROUP_CHAT_ID = os.getenv('TARGET_GROUP_CHAT_ID')
+if not (TELEGRAM_BOT_TOKEN and TARGET_GROUP_CHAT_ID):
+    raise EnvironmentError("Environment variables TELEGRAM_BOT_TOKEN or TARGET_GROUP_CHAT_ID are not set.")
 
 # APIs
 SPOTIFY_API = "https://spotifyapi.nepdevsnepcoder.workers.dev/?songname={query}"
 JIOSAAVN_API = "https://jiosaavn-api-codyandersan.vercel.app/search/all?query={query}&page=1&limit=6"
 
+# Logging setup
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 # Global cache for song data per chat
 group_song_data = {}
 
-# Fetch song details from APIs
+def retry(max_retries=3, delay=2):
+    def decorator_retry(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            retries = 0
+            while retries < max_retries:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    retries += 1
+                    logger.warning(f"Retry {retries}/{max_retries}. Error: {e}")
+                    asyncio.sleep(delay)
+            raise e
+        return wrapper
+    return decorator_retry
+
+# Fetch song details from APIs with retry mechanism
+@retry()
 def fetch_song(query):
     query = query.replace(' ', '+')
 
     # Try Spotify API first
-    response = requests.get(SPOTIFY_API.format(query=query))
-    if response.status_code == 200:
-        data = response.json()
-        if data:
-            return data
-
-    # Fallback to JioSaavn API
-    response = requests.get(JIOSAAVN_API.format(query=query))
-    if response.status_code == 200:
-        data = response.json()
-        if 'results' in data and data['results']:
-            return [
-                {"song_name": result['title'], "artist_name": result['primary_artists'], "download_link": result['perma_url']}
-                for result in data['results']
-            ]
+    for api in [SPOTIFY_API, JIOSAAVN_API]:
+        try:
+            response = requests.get(api.format(query=query), timeout=(5, 10))
+            response.raise_for_status()
+            data = response.json()
+            if data:
+                if api == SPOTIFY_API:
+                    return data
+                elif 'results' in data and data['results']:
+                    return [
+                        {"song_name": result['title'], "artist_name": result['primary_artists'], "download_link": result['perma_url']}
+                        for result in data['results']
+                    ]
+        except requests.RequestException as e:
+            logger.error(f"Failed to fetch from {api}: {e}")
 
     return None
 
@@ -61,7 +87,6 @@ async def search_command(update: Update, context: CallbackContext) -> None:
     song_data = fetch_song(query)
 
     if song_data:
-        # Cache data for the chat
         group_song_data[chat_id] = song_data[:3]
         keyboard = [
             [InlineKeyboardButton(f"🔊 {song['song_name']} - {song['artist_name']}", callback_data=f"{chat_id}_download_{i}")]
@@ -76,6 +101,7 @@ async def search_command(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text("❌ No results found.")
 
 # Callback handler for download (restricted to specific group)
+@retry()
 async def button_handler(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     await query.answer()
@@ -103,22 +129,27 @@ async def button_handler(update: Update, context: CallbackContext) -> None:
     download_link = song['download_link']
 
     try:
-        response = requests.get(download_link, stream=True)
-        if response.status_code == 200:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
-                temp_file.write(response.content)
-                temp_file_path = temp_file.name
+        response = requests.get(download_link, stream=True, timeout=(5, 15))
+        response.raise_for_status()
+        
+        file_ext = mimetypes.guess_extension(response.headers.get('content-type', '').split(';')[0]).split('.')[-1] or 'mp3'
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as temp_file:
+            for chunk in response.iter_content(chunk_size=8192): 
+                temp_file.write(chunk)
+            temp_file_path = temp_file.name
 
+        with open(temp_file_path, 'rb') as audio_file:
             await query.message.reply_audio(
-                audio=open(temp_file_path, 'rb'),
+                audio=audio_file,
                 caption=f"🎶 {song['song_name']} - {song['artist_name']}\nPowered by ASI Music"
             )
-            os.remove(temp_file_path)
-        else:
-            await query.message.reply_text("❌ Failed to download the song.")
+        os.remove(temp_file_path)
+    except requests.RequestException as e:
+        logger.error(f"Download error: {e}")
+        await query.message.reply_text("❌ Failed to download the song. Please try again later.")
     except Exception as e:
-        print(f"Download error: {e}")
-        await query.message.reply_text("❌ An error occurred while downloading the song.")
+        logger.error(f"Unexpected error during download: {e}")
+        await query.message.reply_text("❌ An error occurred while processing your request.")
 
 # Command handler for /help (restricted to specific group)
 async def help_command(update: Update, context: CallbackContext) -> None:
@@ -136,7 +167,7 @@ async def help_command(update: Update, context: CallbackContext) -> None:
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
-# Main function
+# Main function with graceful shutdown
 def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -144,7 +175,12 @@ def main() -> None:
     application.add_handler(CommandHandler('help', help_command))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    application.run_polling()
+    try:
+        application.run_polling()
+    except KeyboardInterrupt:
+        logger.info("Stopping the bot...")
+    finally:
+        application.stop()
 
 if __name__ == '__main__':
     main()
