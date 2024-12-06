@@ -108,20 +108,15 @@ async def button_handler(update: Update, context: CallbackContext) -> None:
     # Parse callback data
     data = query.data.split('_')
     if len(data) != 3 or data[1] != 'download':
-        await query.message.reply_text("❌ Invalid callback data.")
-        return
+        return  # Silently drop the request if the callback data is invalid
 
     chat_id, index = int(data[0]), int(data[2])
 
-    # Check if the callback is from the allowed group
     if chat_id != int(TARGET_GROUP_CHAT_ID):
-        await query.message.reply_text("❌ This action can only be performed in the specific group.")
-        return
+        return  # Silently drop the request if not from the target group
 
-    # Validate group song data
     if chat_id not in group_song_data or index >= len(group_song_data[chat_id]):
-        await query.message.reply_text("❌ Song data not found. Please search again.")
-        return
+        return  # Silently drop the request if song data is invalid
 
     song = group_song_data[chat_id][index]
     download_link = song['download_link']
@@ -138,14 +133,14 @@ async def button_handler(update: Update, context: CallbackContext) -> None:
                 for chunk in response.iter_content(chunk_size=8192):
                     temp_file.write(chunk)
             result.append(temp_file_path)
-        except requests.RequestException as e:
-            logger.error(f"Download error: {e}")
-            result.append(None)
-    
+        except requests.RequestException:
+            logger.error(f"Download error for {download_link}")  # Log the error
+            result.append(None)  # Set result to None if there's an error
+
     result = []
     thread = threading.Thread(target=download_file, args=(download_link, f"/tmp/{song['song_name']}.mp3", result))
     thread.start()
-    thread.join(timeout=180)  # Wait for 3 minutes
+    thread.join(timeout=180)
 
     if result and result[0]:
         temp_file_path = result[0]
@@ -156,10 +151,7 @@ async def button_handler(update: Update, context: CallbackContext) -> None:
                     caption=f"🎶 {song['song_name']} - {song['artist_name']}\nPowered by ASI Music"
                 )
             os.remove(temp_file_path)
-        else:
-            await query.message.reply_text("❌ The downloaded file does not exist.")
-    else:
-        await query.message.reply_text("❌ Failed to download the song. Please try again later.")
+        # If file does not exist, we'll just not do anything, and the user can retry by clicking again.
 
 # Command handler for /help (restricted to specific group)
 async def help_command(update: Update, context: CallbackContext) -> None:
