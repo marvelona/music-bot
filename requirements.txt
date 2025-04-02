@@ -1,3 +1,5 @@
-python-telegram-bot==20.3  # Latest stable version; check version compatibility with your code
-requests  # For handling HTTP requests
-python-dotenv  # For loading environment variables
+python-telegram-bot==20.8
+deezer-python
+yt-dlp
+requests
+python-dotenv
