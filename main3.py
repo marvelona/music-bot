@@ -5,6 +5,7 @@ import asyncio
 import logging
 import functools
 import threading
+import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackContext, CallbackQueryHandler
 from dotenv import load_dotenv
@@ -26,6 +27,11 @@ logger = logging.getLogger(__name__)
 
 # Global cache for song data per chat
 group_song_data = {}
+
+# Cache directory for downloaded audio files
+CACHE_DIR = "/tmp/music-bot-cache"
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
 
 def retry(max_retries=3, delay=2):
     def decorator_retry(func):
@@ -50,7 +56,7 @@ def fetch_song(query):
     client = deezer.Client()
 
     try:
-        # Search for the song on Deezer (removed 'limit' parameter)
+        # Search for the song on Deezer
         search_results = client.search(query)
         if not search_results:
             logger.warning(f"No results found for query: {query}")
@@ -70,7 +76,7 @@ def fetch_song(query):
 
             # Use yt-dlp to search YouTube and get the audio URL
             ydl_opts = {
-                'format': 'bestaudio/best',
+                'format': 'bestaudio/best',  # Keep best quality (e.g., 320kbps if available)
                 'extract_audio': True,
                 'audio_format': 'mp3',
                 'quiet': True,
@@ -160,35 +166,49 @@ async def button_handler(update: Update, context: CallbackContext) -> None:
     song = group_song_data[chat_id][index]
     download_link = song['download_link']
 
-    def download_file(download_link, temp_file_path, result):
-        try:
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'extract_audio': True,
-                'audio_format': 'mp3',
-                'outtmpl': temp_file_path,
-                'quiet': True,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([download_link])
-            result.append(temp_file_path)
-        except Exception as e:
-            logger.error(f"Download error for {download_link}: {e}")
-            result.append(None)
+    # Generate a unique cache file name based on song name and chat ID
+    cache_file_name = f"{song['song_name']}_{song['artist_name']}_{chat_id}_{index}.mp3".replace('/', '_').replace(' ', '_')
+    temp_file_path = os.path.join(CACHE_DIR, cache_file_name)
 
-    result = []
-    temp_file_path = f"/tmp/{song['song_name']}_{chat_id}_{index}.mp3"
-    thread = threading.Thread(target=download_file, args=(download_link, temp_file_path, result))
-    thread.start()
-    thread.join(timeout=180)
+    # Check if the file is already cached
+    if os.path.exists(temp_file_path):
+        logger.info(f"Using cached file: {temp_file_path}")
+    else:
+        def download_file(download_link, temp_file_path, result):
+            start_time = time.time()
+            try:
+                ydl_opts = {
+                    'format': 'bestaudio/best',  # Keep best quality (e.g., 320kbps if available)
+                    'extract_audio': True,
+                    'audio_format': 'mp3',
+                    'outtmpl': temp_file_path,
+                    'quiet': True,
+                    'no_post_overwrites': True,
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([download_link])
+                end_time = time.time()
+                logger.info(f"Download completed in {end_time - start_time:.2f} seconds for {download_link}")
+                result.append(temp_file_path)
+            except Exception as e:
+                logger.error(f"Download error for {download_link}: {e}")
+                result.append(None)
 
-    if result and result[0] and os.path.exists(temp_file_path):
+        result = []
+        thread = threading.Thread(target=download_file, args=(download_link, temp_file_path, result))
+        thread.start()
+        thread.join(timeout=180)
+
+        if not result or not result[0]:
+            await query.message.reply_text("❌ Failed to download the song. Please try again.")
+            return
+
+    if os.path.exists(temp_file_path):
         with open(temp_file_path, 'rb') as audio_file:
             await query.message.reply_audio(
                 audio=audio_file,
                 caption=f"🎶 {song['song_name']} - {song['artist_name']}\nPowered by ASI Music"
             )
-        os.remove(temp_file_path)
     else:
         await query.message.reply_text("❌ Failed to download the song. Please try again.")
 
